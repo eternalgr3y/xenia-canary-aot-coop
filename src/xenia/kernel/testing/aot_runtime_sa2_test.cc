@@ -206,6 +206,103 @@ TEST_CASE("AoT XPort control-load repair preserves full-width rejects",
   CHECK_FALSE(TryRepairXportControlLoad(true, 1u, nullptr));
 }
 
+TEST_CASE("SA2 observation validator matches the production frame contract",
+          "[aot][sa2][aot-runtime-core]") {
+  const auto request = Sa2Manager::BuildFrame(0u, kPeer, kOwn);
+  CHECK(IsExactSa2Frame(request.data(), request.size(), 0u, kPeer, kOwn, kPeer,
+                        0u));
+  CHECK(IsExactSa2Frame(request.data(), request.size(), 0u, kPeer, kOwn, kPeer,
+                        999u));
+  CHECK_FALSE(
+      IsExactSa2Frame(nullptr, request.size(), 0u, kPeer, kOwn, kPeer, 0u));
+  CHECK_FALSE(IsExactSa2Frame(request.data(), request.size() - 1u, 0u, kPeer,
+                              kOwn, kPeer, 0u));
+  CHECK_FALSE(IsExactSa2Frame(request.data(), request.size() + 1u, 0u, kPeer,
+                              kOwn, kPeer, 0u));
+  CHECK_FALSE(IsExactSa2Frame(request.data(), request.size(), 1u, kPeer, kOwn,
+                              kPeer, kSa2GamePort));
+  CHECK_FALSE(IsExactSa2Frame(request.data(), request.size(), 0u, kOwn, kOwn,
+                              kPeer, 0u));
+  CHECK_FALSE(IsExactSa2Frame(request.data(), request.size(), 0u, kPeer, kPeer,
+                              kPeer, 0u));
+  CHECK_FALSE(IsExactSa2Frame(request.data(), request.size(), 0u, kPeer, kOwn,
+                              kOwn, 0u));
+
+  auto malformed = request;
+  malformed[0] ^= 0xFFu;
+  CHECK_FALSE(IsExactSa2Frame(malformed.data(), malformed.size(), 0u, kPeer,
+                              kOwn, kPeer, 0u));
+  malformed = request;
+  malformed[5] ^= 0x01u;
+  CHECK_FALSE(IsExactSa2Frame(malformed.data(), malformed.size(), 0u, kPeer,
+                              kOwn, kPeer, 0u));
+  malformed = request;
+  malformed[9] ^= 0x01u;
+  CHECK_FALSE(IsExactSa2Frame(malformed.data(), malformed.size(), 0u, kPeer,
+                              kOwn, kPeer, 0u));
+
+  const auto ack = Sa2Manager::BuildFrame(1u, kPeer, kOwn);
+  CHECK(IsExactSa2Frame(ack.data(), ack.size(), 1u, kPeer, kOwn, kPeer,
+                        kSa2GamePort));
+  CHECK_FALSE(IsExactSa2Frame(ack.data(), ack.size(), 1u, kPeer, kOwn, kPeer,
+                              kSa2GamePort - 1u));
+}
+
+TEST_CASE("SA2 acceptance observations are ordered and generation bound",
+          "[aot][sa2][aot-runtime-core]") {
+  std::mutex records_mutex;
+  std::vector<Sa2ObservationRecord> records;
+  Sa2Manager manager([&](const Sa2ObservationRecord& record) {
+    std::lock_guard<std::mutex> lock(records_mutex);
+    records.push_back(record);
+  });
+  const auto request = Sa2Manager::BuildFrame(0u, kPeer, kOwn);
+
+  REQUIRE(manager.ObservePreconnectFrame(request.data(), request.size(), kPeer,
+                                         kOwn, kPeer));
+  CHECK_FALSE(manager.ObservePreconnectFrame(request.data(), request.size(),
+                                             kPeer, kOwn, kPeer));
+  REQUIRE(records.size() == 1u);
+  CHECK(records[0].stage == Sa2ObservationStage::kPreconnectPreparedForGuest);
+  CHECK(records[0].sequence == 1u);
+  CHECK(records[0].generation == 1u);
+
+  auto state = std::make_shared<FakeState>();
+  REQUIRE(manager.Start(kOwn, kPeer, Factory(state), LongOptions()));
+  REQUIRE(records.size() == 2u);
+  CHECK(records[1].stage == Sa2ObservationStage::kXNetConnectManagerArmed);
+  CHECK(records[1].sequence == 2u);
+  CHECK(records[1].generation == records[0].generation);
+
+  Sa2ConsumeToken first_token;
+  REQUIRE(manager.HandleRequest(
+      request.data(), request.size(), kPeer, [](const auto&) { return true; },
+      &first_token));
+  CHECK(records.size() == 2u);
+  REQUIRE(manager.RecordConsumedAcked(first_token));
+  CHECK_FALSE(manager.RecordConsumedAcked(first_token));
+  REQUIRE(records.size() == 3u);
+  CHECK(records[2].stage == Sa2ObservationStage::kPostconnectConsumedAckSent);
+  CHECK(records[2].sequence == 3u);
+  CHECK(records[2].generation == records[1].generation);
+
+  manager.Stop();
+  CHECK_FALSE(manager.RecordConsumedAcked(first_token));
+  REQUIRE(manager.ObservePreconnectFrame(request.data(), request.size(), kPeer,
+                                         kOwn, kPeer));
+  REQUIRE(records.size() == 4u);
+  CHECK(records[3].sequence == 4u);
+  CHECK(records[3].generation == 2u);
+  auto next_state = std::make_shared<FakeState>();
+  REQUIRE(manager.Start(kOwn, kPeer, Factory(next_state), LongOptions()));
+  REQUIRE(records.size() == 5u);
+  CHECK(records[4].stage == Sa2ObservationStage::kXNetConnectManagerArmed);
+  CHECK(records[4].sequence == 5u);
+  CHECK(records[4].generation == records[3].generation);
+  CHECK_FALSE(manager.RecordConsumedAcked(first_token));
+  manager.Stop();
+}
+
 TEST_CASE("SA2 request requires a prior local connect",
           "[aot][sa2][aot-runtime-core]") {
   Sa2Manager manager;

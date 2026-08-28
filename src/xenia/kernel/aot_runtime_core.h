@@ -45,9 +45,16 @@ bool AotRuntimeSa2Query(KernelState* kernel_state, uint32_t guest_peer_address,
 void AotRuntimeSa2Unregister(KernelState* kernel_state,
                              uint32_t guest_peer_address);
 bool AotRuntimeSa2InterceptionEnabled(KernelState* kernel_state);
+void AotRuntimeSa2ObservePreconnectPrepared(KernelState* kernel_state,
+                                            const uint8_t* bytes, size_t size,
+                                            uint32_t source_ipv4_network);
 bool AotRuntimeSa2HandleRequest(KernelState* kernel_state, const uint8_t* bytes,
                                 size_t size, uint32_t source_ipv4_network,
-                                aot_runtime::Sa2Manager::AckSender ack_sender);
+                                aot_runtime::Sa2Manager::AckSender ack_sender,
+                                aot_runtime::Sa2ConsumeToken* consume_token);
+void AotRuntimeSa2RecordConsumedAcked(
+    KernelState* kernel_state,
+    const aot_runtime::Sa2ConsumeToken& consume_token);
 void AotRuntimeSa2Shutdown();
 
 }  // namespace xe::kernel

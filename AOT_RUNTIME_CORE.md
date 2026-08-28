@@ -31,6 +31,16 @@ non-XSA1 or rejected XSA1 datagram remains visible to the guest unchanged.
 XSA1 is a local reachability and state shim; it does not provide cryptographic
 authentication, confidentiality, or integrity.
 
+When this exact runtime gate is enabled, three generation-bound acceptance
+markers expose only the handshake ordering: a valid request prepared for guest
+delivery before local connect, a successfully armed local connect, and a
+post-connect retransmission consumed after its exact ACK was sent. Each marker
+includes only a process-local sequence and connection generation, never packet
+bytes or a peer address. Both instances must produce the armed marker, and at
+least one must produce one same-generation prepared -> armed -> consumed/ACKed
+chain. The other instance may legitimately produce only the armed marker when
+the first exchange establishes both sides before its worker sends.
+
 ## Mutation seams
 
 `--aot_runtime_leg_destination_repair=true` enables the guarded seam at

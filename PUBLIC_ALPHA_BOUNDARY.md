@@ -15,6 +15,10 @@ Netplay commit `b5f6f6ed618210ecfbbcb228994418f734cdd850`.
 - A default-off, title/build-scoped XSA1 secure-association handshake for one
   explicitly configured synthetic-loopback peer. The worker is attempt-,
   receive-, and timeout-bounded and is synchronously stopped and joined.
+- Three title/build/config-gated, generation-bound acceptance markers that
+  record only pre-connect guest-buffer preparation, manager arming, and
+  post-connect consume/ACK ordering. They contain a process-local sequence and
+  generation, but neither packet bytes nor peer addresses.
 - A default-off leg-destination repair that fills only an empty type-1 endpoint
   at one exact instruction seam. This writes the configured peer IPv4 address
   and port `0x1771` into guest memory.
@@ -42,8 +46,8 @@ instance's own initialized synthetic identity.
 ## Deliberately excluded
 
 - Broad guest-address trap lists, gameplay-state forcing, and unguarded writes.
-- PASS-series probes, diagnostic logging, screenshots, logs, saves, game
-  images, and reverse-engineering artifacts.
+- PASS-series probes, unbounded or private diagnostic logging, screenshots,
+  logs, saves, game images, and reverse-engineering artifacts.
 - Machine-specific paths, controller IDs, account identifiers, and backend
   deployment material.
 - The historical USER0 record/replay/UDP input bridge.

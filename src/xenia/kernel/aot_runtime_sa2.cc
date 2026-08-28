@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 namespace xe::kernel::aot_runtime {
 
@@ -29,6 +30,23 @@ uint32_t ReadAddress(const uint8_t* bytes) {
 }
 
 }  // namespace
+
+bool IsExactSa2Frame(const uint8_t* bytes, size_t size, uint8_t type,
+                     uint32_t source_ipv4_network, uint32_t own_ipv4_network,
+                     uint32_t peer_ipv4_network, uint16_t source_port) {
+  if (!bytes || size != kSa2FrameSize || !own_ipv4_network ||
+      !peer_ipv4_network || own_ipv4_network == peer_ipv4_network ||
+      !std::equal(kSa2Magic.begin(), kSa2Magic.end(), bytes) ||
+      bytes[4] != type || source_ipv4_network != peer_ipv4_network ||
+      ReadAddress(bytes + 5) != peer_ipv4_network ||
+      ReadAddress(bytes + 9) != own_ipv4_network) {
+    return false;
+  }
+  return type != 1u || source_port == kSa2GamePort;
+}
+
+Sa2Manager::Sa2Manager(ObservationSink observation_sink)
+    : observation_sink_(std::move(observation_sink)) {}
 
 Sa2Manager::~Sa2Manager() { Stop(); }
 
@@ -49,6 +67,44 @@ bool Sa2Manager::Matches(uint32_t own_ipv4_network,
   std::lock_guard<std::mutex> lock(mutex_);
   return connect_armed_ && own_ipv4_network_ == own_ipv4_network &&
          peer_ipv4_network_ == peer_ipv4_network;
+}
+
+void Sa2Manager::EmitObservationLocked(Sa2ObservationStage stage,
+                                       uint64_t generation) {
+  if (!observation_sink_) {
+    return;
+  }
+  Sa2ObservationRecord record;
+  record.stage = stage;
+  record.sequence = ++observation_sequence_;
+  record.generation = generation;
+  record.own_ipv4_network = own_ipv4_network_;
+  record.peer_ipv4_network = peer_ipv4_network_;
+  try {
+    observation_sink_(record);
+  } catch (...) {
+    // Acceptance evidence must never alter association behavior.
+  }
+}
+
+bool Sa2Manager::ObservePreconnectFrame(const uint8_t* bytes, size_t size,
+                                        uint32_t source_ipv4_network,
+                                        uint32_t own_ipv4_network,
+                                        uint32_t peer_ipv4_network) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (connect_armed_ || pending_preconnect_generation_ ||
+      !IsExactSa2Frame(bytes, size, 0u, source_ipv4_network, own_ipv4_network,
+                       peer_ipv4_network, 0u)) {
+    return false;
+  }
+  own_ipv4_network_ = own_ipv4_network;
+  peer_ipv4_network_ = peer_ipv4_network;
+  pending_preconnect_generation_ = observation_generation_ + 1u;
+  pending_preconnect_own_ipv4_network_ = own_ipv4_network;
+  pending_preconnect_peer_ipv4_network_ = peer_ipv4_network;
+  EmitObservationLocked(Sa2ObservationStage::kPreconnectPreparedForGuest,
+                        pending_preconnect_generation_);
+  return true;
 }
 
 bool Sa2Manager::Start(uint32_t own_ipv4_network, uint32_t peer_ipv4_network,
@@ -92,11 +148,26 @@ bool Sa2Manager::Start(uint32_t own_ipv4_network, uint32_t peer_ipv4_network,
     peer_ipv4_network_ = peer_ipv4_network;
     connect_armed_ = true;
     ++generation_;
+    const bool pending_preconnect_matches =
+        pending_preconnect_generation_ == observation_generation_ + 1u &&
+        pending_preconnect_own_ipv4_network_ == own_ipv4_network &&
+        pending_preconnect_peer_ipv4_network_ == peer_ipv4_network;
+    if (pending_preconnect_generation_ && !pending_preconnect_matches) {
+      InvalidatePendingObservationLocked();
+    }
+    ++observation_generation_;
+    active_observation_generation_ = observation_generation_;
+    postconnect_observation_generation_ = 0;
     options_ = options;
     transport_ = std::move(transport);
     stop_requested_.store(false, std::memory_order_release);
     state_.store(Sa2State::kPending, std::memory_order_release);
     running_.store(true, std::memory_order_release);
+    EmitObservationLocked(Sa2ObservationStage::kXNetConnectManagerArmed,
+                          active_observation_generation_);
+    pending_preconnect_generation_ = 0;
+    pending_preconnect_own_ipv4_network_ = 0;
+    pending_preconnect_peer_ipv4_network_ = 0;
     worker_ = std::thread(&Sa2Manager::WorkerMain, this);
   }
   return true;
@@ -105,18 +176,9 @@ bool Sa2Manager::Start(uint32_t own_ipv4_network, uint32_t peer_ipv4_network,
 bool Sa2Manager::ValidateFrameLocked(const uint8_t* bytes, size_t size,
                                      uint8_t type, uint32_t source_ipv4_network,
                                      uint16_t source_port) const {
-  if (!bytes || size != kSa2FrameSize ||
-      !std::equal(kSa2Magic.begin(), kSa2Magic.end(), bytes) ||
-      bytes[4] != type) {
-    return false;
-  }
-  if (!connect_armed_ || !own_ipv4_network_ || !peer_ipv4_network_ ||
-      source_ipv4_network != peer_ipv4_network_ ||
-      ReadAddress(bytes + 5) != peer_ipv4_network_ ||
-      ReadAddress(bytes + 9) != own_ipv4_network_) {
-    return false;
-  }
-  return type != 1u || source_port == kSa2GamePort;
+  return connect_armed_ &&
+         IsExactSa2Frame(bytes, size, type, source_ipv4_network,
+                         own_ipv4_network_, peer_ipv4_network_, source_port);
 }
 
 bool Sa2Manager::ValidateFrame(const uint8_t* bytes, size_t size, uint8_t type,
@@ -129,7 +191,11 @@ bool Sa2Manager::ValidateFrame(const uint8_t* bytes, size_t size, uint8_t type,
 
 bool Sa2Manager::HandleRequest(const uint8_t* bytes, size_t size,
                                uint32_t source_ipv4_network,
-                               AckSender ack_sender) {
+                               AckSender ack_sender,
+                               Sa2ConsumeToken* consume_token) {
+  if (consume_token) {
+    *consume_token = {};
+  }
   if (!ack_sender) {
     return false;
   }
@@ -156,6 +222,30 @@ bool Sa2Manager::HandleRequest(const uint8_t* bytes, size_t size,
     return false;
   }
   state_.store(Sa2State::kEstablished, std::memory_order_release);
+  if (consume_token) {
+    consume_token->manager_generation = generation_;
+    consume_token->observation_generation = active_observation_generation_;
+    consume_token->own_ipv4_network = own_ipv4_network_;
+    consume_token->peer_ipv4_network = peer_ipv4_network_;
+  }
+  return true;
+}
+
+bool Sa2Manager::RecordConsumedAcked(const Sa2ConsumeToken& consume_token) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!connect_armed_ || !consume_token.manager_generation ||
+      !consume_token.observation_generation ||
+      generation_ != consume_token.manager_generation ||
+      active_observation_generation_ != consume_token.observation_generation ||
+      own_ipv4_network_ != consume_token.own_ipv4_network ||
+      peer_ipv4_network_ != consume_token.peer_ipv4_network ||
+      state_.load(std::memory_order_acquire) != Sa2State::kEstablished ||
+      postconnect_observation_generation_ == active_observation_generation_) {
+    return false;
+  }
+  postconnect_observation_generation_ = active_observation_generation_;
+  EmitObservationLocked(Sa2ObservationStage::kPostconnectConsumedAckSent,
+                        active_observation_generation_);
   return true;
 }
 
@@ -233,6 +323,8 @@ void Sa2Manager::StopLocked() {
   transport_.reset();
   own_ipv4_network_ = 0;
   peer_ipv4_network_ = 0;
+  active_observation_generation_ = 0;
+  postconnect_observation_generation_ = 0;
   state_.store(Sa2State::kIdle, std::memory_order_release);
   running_.store(false, std::memory_order_release);
 }
@@ -240,6 +332,18 @@ void Sa2Manager::StopLocked() {
 void Sa2Manager::Stop() {
   std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
   StopLocked();
+  std::lock_guard<std::mutex> lock(mutex_);
+  InvalidatePendingObservationLocked();
+}
+
+void Sa2Manager::InvalidatePendingObservationLocked() {
+  if (pending_preconnect_generation_) {
+    observation_generation_ =
+        std::max(observation_generation_, pending_preconnect_generation_);
+  }
+  pending_preconnect_generation_ = 0;
+  pending_preconnect_own_ipv4_network_ = 0;
+  pending_preconnect_peer_ipv4_network_ = 0;
 }
 
 }  // namespace xe::kernel::aot_runtime

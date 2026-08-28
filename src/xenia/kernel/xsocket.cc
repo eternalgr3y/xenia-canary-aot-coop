@@ -507,6 +507,26 @@ poll_again:
         receive_async_data.overlapped->internal = bytes_received;
       }
       receive_async_data.from->to_guest(sa);
+      if (ret >= 0 && type_ == X_SOCK_DGRAM &&
+          bound_port_ == aot_runtime::kSa2GamePort &&
+          bytes_received == aot_runtime::kSa2FrameSize &&
+          receive_async_data.from &&
+          receive_async_data.from->address_family == XSocket::X_AF_INET) {
+        std::array<uint8_t, aot_runtime::kSa2FrameSize> frame{};
+        size_t copied = 0;
+        for (uint32_t i = 0;
+             i < receive_async_data.num_buffers && copied < frame.size(); ++i) {
+          const size_t amount =
+              std::min<size_t>(buffers[i].len, frame.size() - copied);
+          std::memcpy(frame.data() + copied, buffers[i].buf, amount);
+          copied += amount;
+        }
+        if (copied == frame.size()) {
+          AotRuntimeSa2ObservePreconnectPrepared(
+              kernel_state(), frame.data(), frame.size(),
+              receive_async_data.from->address_ip.s_addr);
+        }
+      }
     } else {
       sockaddr native_from{};
       int native_from_len = sizeof(native_from);
@@ -519,6 +539,7 @@ poll_again:
                         &bytes_received, &flags, &native_from, &native_from_len,
                         nullptr, nullptr);
       auto disposition = AotRuntimeSa2DatagramDisposition::kPassThrough;
+      aot_runtime::Sa2ConsumeToken consume_token;
       if (ret < 0) {
         receive_async_data.overlapped->internal_high = GetLastWSAError();
       } else if (bytes_received == aot_runtime::kSa2FrameSize &&
@@ -536,13 +557,15 @@ poll_again:
         if (copied == frame.size()) {
           disposition = AotRuntimeSa2Disposition(AotRuntimeSa2HandleRequest(
               kernel_state(), frame.data(), frame.size(),
-              source.sin_addr.s_addr, [&](const auto& ack) {
+              source.sin_addr.s_addr,
+              [&](const auto& ack) {
                 const int sent = ::sendto(
                     native_handle_, reinterpret_cast<const char*>(ack.data()),
                     static_cast<int>(ack.size()), 0, &native_from,
                     native_from_len);
                 return sent == static_cast<int>(ack.size());
-              }));
+              },
+              &consume_token));
         }
       }
 
@@ -562,6 +585,7 @@ poll_again:
         // A control frame is not a zero-byte game datagram. Poll again so the
         // guest observes only the next real datagram (or normal would-block /
         // pending behavior when no real datagram is ready).
+        AotRuntimeSa2RecordConsumedAcked(kernel_state(), consume_token);
         goto poll_again;
       }
       goto receive_complete;

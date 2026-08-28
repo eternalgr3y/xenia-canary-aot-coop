@@ -28,6 +28,7 @@
 #endif
 // clang-format on
 
+#include "xenia/base/logging.h"
 #include "xenia/cpu/aot_runtime_core.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/kernel/XLiveAPI.h"
@@ -195,8 +196,32 @@ class NativeSa2Transport final : public Sa2Transport {
 #endif
 };
 
+void LogSa2AcceptanceObservation(
+    const aot_runtime::Sa2ObservationRecord& record) {
+  switch (record.stage) {
+    case aot_runtime::Sa2ObservationStage::kPreconnectPreparedForGuest:
+      XELOGI(
+          "[AOT-RUNTIME-SA2][ACCEPT] seq={} generation={} stage=1 "
+          "event=PRECONNECT_XSA1_PREPARED_FOR_GUEST",
+          record.sequence, record.generation);
+      break;
+    case aot_runtime::Sa2ObservationStage::kXNetConnectManagerArmed:
+      XELOGI(
+          "[AOT-RUNTIME-SA2][ACCEPT] seq={} generation={} stage=2 "
+          "event=XNETCONNECT_MANAGER_ARMED",
+          record.sequence, record.generation);
+      break;
+    case aot_runtime::Sa2ObservationStage::kPostconnectConsumedAckSent:
+      XELOGI(
+          "[AOT-RUNTIME-SA2][ACCEPT] seq={} generation={} stage=3 "
+          "event=POSTCONNECT_XSA1_RETRANSMIT_CONSUMED_ACK_SENT",
+          record.sequence, record.generation);
+      break;
+  }
+}
+
 Sa2Manager& RuntimeSa2Manager() {
-  static Sa2Manager manager;
+  static Sa2Manager manager(LogSa2AcceptanceObservation);
   return manager;
 }
 
@@ -249,16 +274,41 @@ bool AotRuntimeSa2InterceptionEnabled(KernelState* kernel_state) {
          RuntimeSa2Manager().Matches(config.own_network, config.peer_network);
 }
 
+void AotRuntimeSa2ObservePreconnectPrepared(KernelState* kernel_state,
+                                            const uint8_t* bytes, size_t size,
+                                            uint32_t source_ipv4_network) {
+  RuntimeConfig config;
+  if (!ResolveRuntimeConfig(kernel_state, &config)) {
+    return;
+  }
+  RuntimeSa2Manager().ObservePreconnectFrame(bytes, size, source_ipv4_network,
+                                             config.own_network,
+                                             config.peer_network);
+}
+
 bool AotRuntimeSa2HandleRequest(KernelState* kernel_state, const uint8_t* bytes,
                                 size_t size, uint32_t source_ipv4_network,
-                                Sa2Manager::AckSender ack_sender) {
+                                Sa2Manager::AckSender ack_sender,
+                                aot_runtime::Sa2ConsumeToken* consume_token) {
   RuntimeConfig config;
   if (!ResolveRuntimeConfig(kernel_state, &config) ||
       !RuntimeSa2Manager().Matches(config.own_network, config.peer_network)) {
     return false;
   }
-  return RuntimeSa2Manager().HandleRequest(bytes, size, source_ipv4_network,
-                                           std::move(ack_sender));
+  return RuntimeSa2Manager().HandleRequest(
+      bytes, size, source_ipv4_network, std::move(ack_sender), consume_token);
+}
+
+void AotRuntimeSa2RecordConsumedAcked(
+    KernelState* kernel_state,
+    const aot_runtime::Sa2ConsumeToken& consume_token) {
+  RuntimeConfig config;
+  if (!ResolveRuntimeConfig(kernel_state, &config) ||
+      consume_token.own_ipv4_network != config.own_network ||
+      consume_token.peer_ipv4_network != config.peer_network) {
+    return;
+  }
+  RuntimeSa2Manager().RecordConsumedAcked(consume_token);
 }
 
 void AotRuntimeSa2Shutdown() { RuntimeSa2Manager().Stop(); }

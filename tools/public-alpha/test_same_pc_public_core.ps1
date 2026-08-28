@@ -50,6 +50,8 @@ $required = [ordered]@{
         $source.tests.Contains('leg destination repair is exact') -and
         $source.tests.Contains('preserves full-width rejects')
     sa2_default_off = $source.cpuFlags.Contains('aot_runtime_sa2, false,')
+    reviewed_aot_cvars_only = ([regex]::Matches($source.cpuFlags,
+        'DEFINE_(?:bool|string)\(\s*aot_runtime_')).Count -eq 4
     leg_default_off = $source.cpuFlags.Contains('aot_runtime_leg_destination_repair, false,')
     xport_default_off = $source.cpuFlags.Contains('aot_runtime_xport_control_load_repair, false,')
     exact_mutation_addresses = $source.cpuContract.Contains('0x823A0CC8u') -and
@@ -75,6 +77,30 @@ $required = [ordered]@{
     query_side_effect_free = $source.runtime.Contains('Query is deliberately side-effect free')
     ack_generation_commit = $source.sa2.Contains('generation_ != generation') -and
         $source.sa2.Contains('if (!ack_sender(ack))')
+    shared_exact_frame_validator = $source.sa2.Contains(
+        'bool IsExactSa2Frame(') -and
+        $source.sa2.Contains('return connect_armed_ &&') -and
+        $source.sa2.Contains('IsExactSa2Frame(bytes, size, type,')
+    observations_are_generation_bound = $source.sa2.Contains(
+        'active_observation_generation_ !=') -and
+        $source.sa2.Contains('consume_token.observation_generation') -and
+        $source.tests.Contains('observations are ordered and generation bound')
+    observations_share_manager_lock = $source.sa2 -match
+        '(?s)ObservePreconnectFrame\(.*?lock\(mutex_\).*?EmitObservationLocked\(' -and
+        $source.sa2 -match
+        '(?s)EmitObservationLocked\(Sa2ObservationStage::kXNetConnectManagerArmed,.*?worker_ = std::thread'
+    exact_acceptance_markers = $source.runtime.Contains(
+        'event=PRECONNECT_XSA1_PREPARED_FOR_GUEST') -and
+        $source.runtime.Contains('event=XNETCONNECT_MANAGER_ARMED') -and
+        $source.runtime.Contains(
+            'event=POSTCONNECT_XSA1_RETRANSMIT_CONSUMED_ACK_SENT')
+    preconnect_marker_in_passthrough = $source.xsocket -match
+        '(?s)if \(!intercept_sa2\).*?overlapped->internal = bytes_received;.*?to_guest\(sa\);.*?AotRuntimeSa2ObservePreconnectPrepared\(.*?\}\s*else\s*\{'
+    default_passthrough_socket_shape_preserved = $source.xsocket.Contains(
+        'sockaddr addr = receive_async_data.from->to_host();') -and
+        -not $source.xsocket.Contains('sockaddr* native_from_ptr')
+    consumed_marker_before_poll_again = $source.xsocket -match
+        '(?s)if \(AotRuntimeSa2ShouldPollAgain\(disposition\)\).*?AotRuntimeSa2RecordConsumedAcked\(kernel_state\(\), consume_token\);\s*goto poll_again;'
     async_only_intercept = $source.xsocket.Contains('if (!intercept_sa2)') -and
         $source.xsocket.Contains('AotRuntimeSa2ShouldPollAgain(disposition)') -and
         $source.xsocket.Contains('goto poll_again;')
@@ -86,7 +112,7 @@ $required = [ordered]@{
         $source.tests.Contains('unregister during ACK') -and
         $source.tests.Contains('malformed flood')
     focused_test_tag = ([regex]::Matches($source.tests,
-        '\[aot-runtime-core\]')).Count -eq 11
+        '\[aot-runtime-core\]')).Count -eq 13
     ci_filtered_tests = $source.workflow.Contains(
         "xenia-kernel-tests.exe '[aot-runtime-core]'")
     ci_app_build = $source.workflow.Contains(
