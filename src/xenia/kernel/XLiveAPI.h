@@ -117,6 +117,7 @@ class XLiveAPI {
   const std::map<uint64_t, std::string> DeleteMyProfiles();
 
   std::unique_ptr<PlayerObjectJSON> FindPlayer(std::string ip);
+  std::unique_ptr<PlayerObjectJSON> FindPlayerByXuid(uint64_t xuid);
 
   bool UpdateQoSCache(const uint64_t sessionId,
                       const std::vector<uint8_t> qos_payloade);

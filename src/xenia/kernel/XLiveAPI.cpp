@@ -45,6 +45,14 @@ DEFINE_int32(network_mode, 2,
 DEFINE_bool(bind_interface, false,
             "Useful for network Tunnels/VPNs e.g. XLink Kai.", "Live");
 
+DEFINE_bool(
+    network_synthetic_loopback, false,
+    "For running multiple xenia instances on ONE PC (same-PC netplay): give "
+    "each instance a unique loopback online IP derived from its console MAC so "
+    "the IP-keyed netplay treats the instances as distinct consoles. Leave "
+    "false for normal LAN/internet play.",
+    "Live");
+
 DEFINE_bool(xstorage_backend, true,
             "Request XStorage content from backend and fallback locally, "
             "otherwise only use local content.",
@@ -90,7 +98,9 @@ void XLiveAPI::IpGetConsoleXnAddr(XNADDR* XnAddr_ptr) {
   const auto xbl_api = kernel_state()->GetXboxLiveAPI();
 
   if (cvars::network_mode != NETWORK_MODE::OFFLINE) {
-    if (xbl_api->IsConnectedToServer() && is_WAN_routing) {
+    const bool use_synthetic = cvars::network_synthetic_loopback &&
+                               xbl_api->OnlineIP().sin_addr.s_addr != 0;
+    if ((xbl_api->IsConnectedToServer() && is_WAN_routing) || use_synthetic) {
       XnAddr_ptr->ina = xbl_api->OnlineIP().sin_addr;
       XnAddr_ptr->inaOnline = xbl_api->OnlineIP().sin_addr;
     } else {
@@ -99,7 +109,8 @@ void XLiveAPI::IpGetConsoleXnAddr(XNADDR* XnAddr_ptr) {
     }
   }
 
-  if (cvars::network_mode == NETWORK_MODE::XBOXLIVE) {
+  if (cvars::network_mode == NETWORK_MODE::XBOXLIVE ||
+      cvars::network_synthetic_loopback) {
     XnAddr_ptr->wPortOnline = xbl_api->GetPlayerPort();
   }
 
@@ -296,6 +307,28 @@ void XLiveAPI::Init() {
   // games thread during network initialization.
   if (whoami_result_.valid()) {
     online_ip_ = whoami_result_.get();
+
+    // Same-PC netplay: the local server reports 127.0.0.1 for every instance,
+    // which collapses two instances into one identity (the netplay keys
+    // players, caches and XNADDRs by IP). Override with a unique per-instance
+    // loopback IP derived from the console MAC. 127.0.0.0/8 routes to loopback
+    // and the game's sockets bind 0.0.0.0, so a peer can still reach
+    // 127.b.b.b:port locally.
+    // Do not let the synthetic identity turn a failed whoami request into an
+    // apparently connected client. Only substitute after the backend supplied
+    // a non-zero address.
+    if (cvars::network_synthetic_loopback && online_ip_.sin_addr.s_addr != 0) {
+      const uint64_t mac = GetConsoleMacAddress().to_uint64();
+      uint8_t b2 = static_cast<uint8_t>((mac >> 16) & 0xFF);
+      uint8_t b1 = static_cast<uint8_t>((mac >> 8) & 0xFF);
+      uint8_t b0 = static_cast<uint8_t>(mac & 0xFF);
+      if (b2 == 0 && b1 == 0 && b0 <= 1) {
+        b0 = 2;  // never collide with 127.0.0.0 / 127.0.0.1 (the server)
+      }
+      const uint8_t octets[4] = {127, b2, b1, b0};
+      std::memcpy(&online_ip_.sin_addr.s_addr, octets, sizeof(octets));
+      XELOGI("XLiveAPI:: same-PC synthetic online IP 127.{}.{}.{}", b2, b1, b0);
+    }
   }
 
   if (!IsConnectedToServer()) {
@@ -340,7 +373,18 @@ bool XLiveAPI::IsConnectedToServer() const {
   return OnlineIP().sin_addr.s_addr != 0;
 }
 
-uint16_t XLiveAPI::GetPlayerPort() const { return 36000; }
+uint16_t XLiveAPI::GetPlayerPort() const {
+  if (!cvars::network_synthetic_loopback) {
+    return 36000;
+  }
+
+  // Derive a unique "online" port per xenia instance from its MAC (persisted
+  // in the portable folder's xconfig.settings, unique even on same PC).
+  // This enables distinct P2P reachability for same-PC netplay (IP:port).
+  // Offset from 36000 (API default) to reduce bind conflicts.
+  uint64_t mac = GetConsoleMacAddress().to_uint64();
+  return static_cast<uint16_t>(36001 + (mac & 0x3FF));
+}
 
 int8_t XLiveAPI::GetVersionStatus() const { return version_status_; }
 
@@ -796,6 +840,9 @@ std::unique_ptr<HTTPResponseObjectJSON> XLiveAPI::RegisterPlayer(
   player.MachineID(GetLocalMachineId(mac_address));
   player.HostAddress(OnlineIP_str());
   player.MacAddress(mac_address.to_uint64());
+  if (cvars::network_synthetic_loopback) {
+    player.Port(GetPlayerPort());
+  }
   player.Settings(settings);
 
   std::string player_output;
@@ -816,10 +863,14 @@ std::unique_ptr<HTTPResponseObjectJSON> XLiveAPI::RegisterPlayer(
 
   XELOGI("POST Success");
 
-  auto player_lookup = FindPlayer(OnlineIP_str());
+  // Self-check by own XUID (MAC identity) instead of IP, to support multiple
+  // players at the same hostAddress (same-PC netplay).
+  auto player_lookup = cvars::network_synthetic_loopback
+                           ? FindPlayerByXuid(registered_xuid)
+                           : FindPlayer(OnlineIP_str());
 
   // Check for erroneous profile lookup
-  if (player_lookup->XUID() != player.XUID()) {
+  if (player_lookup && player_lookup->XUID() != player.XUID()) {
     XELOGI("XLiveAPI:: {} XUID mismatch!", player.Gamertag());
     xuid_mismatch_ = true;
 
@@ -876,6 +927,38 @@ std::unique_ptr<PlayerObjectJSON> XLiveAPI::FindPlayer(std::string ip) {
   player = response->Deserialize<PlayerObjectJSON>();
 
   XELOGI("Requesting {:016X} player details.", player->XUID().get());
+
+  return player;
+}
+
+std::unique_ptr<PlayerObjectJSON> XLiveAPI::FindPlayerByXuid(uint64_t xuid) {
+  std::unique_ptr<PlayerObjectJSON> player =
+      std::make_unique<PlayerObjectJSON>();
+
+  Document doc;
+  doc.SetObject();
+  doc.AddMember("xuid", fmt::format("{:016X}", xuid), doc.GetAllocator());
+
+  rapidjson::StringBuffer buffer;
+  PrettyWriter<rapidjson::StringBuffer> writer(buffer);
+  doc.Accept(writer);
+
+  const uint8_t* find_players_data =
+      reinterpret_cast<const uint8_t*>(buffer.GetString());
+
+  std::unique_ptr<HTTPResponseObjectJSON> response =
+      Post(BuildEndpoint("players/find"), find_players_data);
+
+  if (response->StatusCode() != HTTP_STATUS_CODE::HTTP_CREATED) {
+    XELOGE("FindPlayersByXuid error message: {}", response->Message());
+    assert_always();
+
+    return player;
+  }
+
+  player = response->Deserialize<PlayerObjectJSON>();
+
+  XELOGI("Requesting {:016X} player details by XUID.", player->XUID().get());
 
   return player;
 }

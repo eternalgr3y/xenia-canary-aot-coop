@@ -85,6 +85,11 @@ bool PlayerObjectJSON::Serialize(
   writer->String("macAddress");
   writer->String(fmt::format("{:012x}", macAddress_.get()));
 
+  if (port_) {
+    writer->String("port");
+    writer->Int(port_);
+  }
+
   writer->String("settings");
   writer->StartObject();
 

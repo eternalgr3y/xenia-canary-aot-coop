@@ -1,4 +1,32 @@
-# Xenia Canary Netplay
+# Xenia Same-PC Netplay Foundation
+
+This branch is an early, source-level foundation for running two Xenia
+instances on one Windows PC. It adds opt-in synthetic loopback identities,
+per-instance SDL controller selection, and an optional controller-axis
+correction. The accepted Army of Two B19 run exercised the first two features;
+it did not exercise the axis correction.
+
+This is **not yet a complete Army of Two co-op alpha**. The accepted run also
+depended on a title-specific secure-association and native post-join
+compatibility layer that has intentionally not been published here until it can
+be reduced and independently validated. See
+[`PUBLIC_ALPHA_BOUNDARY.md`](PUBLIC_ALPHA_BOUNDARY.md) for the exact boundary.
+
+The source contract runs in CI. A local release build may be produced with
+`xb setup` followed by `xb build --config=release --target=xenia-app`.
+Successful compilation does not establish gameplay compatibility.
+
+## Upstream lineage and resources
+
+This work is based on AdrianCassar's Xenia Canary Netplay commit
+`b5f6f6ed618210ecfbbcb228994418f734cdd850`, which is itself derived from Xenia
+Canary. All release, buildbot, hosted-session, wiki, compatibility, and support
+links in the preserved upstream README below belong to those upstream projects.
+They do not distribute, host, or support this branch.
+
+---
+
+## Preserved upstream Xenia Canary Netplay README
 
 This is a fork of [Xenia Canary](https://github.com/xenia-canary/xenia-canary) which implements online multiplayer features. The REST API powering this fork can be found [here](https://github.com/AdrianCassar/Xenia-WebServices#xenia-web-services).
 

@@ -17,6 +17,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 
 DECLARE_bool(bind_interface);
+DECLARE_bool(network_synthetic_loopback);
 
 using namespace std::chrono_literals;
 
@@ -252,7 +253,7 @@ X_STATUS XSocket::Connect(const XSOCKADDR_IN* name, int name_len) {
 
   const auto upnp = kernel_state()->emulator()->GetUPnP();
 
-  if (upnp) {
+  if (upnp && !cvars::network_synthetic_loopback) {
     sa_in.address_port = upnp->GetMappedConnectPort(name->address_port);
   }
 
@@ -276,14 +277,25 @@ X_STATUS XSocket::Bind(const XSOCKADDR_IN* name, int name_len) {
 
   const auto upnp = kernel_state()->emulator()->GetUPnP();
 
-  if (upnp) {
+  if (upnp && !cvars::network_synthetic_loopback) {
     sa_in.address_port = upnp->GetMappedBindPort(name->address_port);
   }
 
   sockaddr addr = sa_in.to_host();
 
   // Force socket to bind to the IP of the selected interface
-  if (cvars::bind_interface) {
+  if (cvars::network_synthetic_loopback) {
+    // Same-PC synthetic loopback: bind the *native* socket to our distinct
+    // 127.b.b.b so outbound UDP packets carry src = synthetic IP (not
+    // 127.0.0.1), and inbound to synthetic:port reach us. This makes the
+    // distinct 127.x XNADDRs actually routable/receivable between two instances
+    // on one PC via OS loopback, without a virtual net layer.
+    sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(&addr);
+    const auto xbl_api = kernel_state()->GetXboxLiveAPI();
+    if (xbl_api && xbl_api->OnlineIP().sin_addr.s_addr) {
+      addr_in->sin_addr = xbl_api->OnlineIP().sin_addr;
+    }
+  } else if (cvars::bind_interface) {
     sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(&addr);
 
     const auto network_adapter =
@@ -666,14 +678,14 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags,
                     XSOCKADDR_IN* to, uint32_t to_len) {
   const auto upnp = kernel_state()->emulator()->GetUPnP();
 
-  if (upnp) {
+  if (upnp && !cvars::network_synthetic_loopback) {
     to->address_port = upnp->GetMappedBindPort(to->address_port);
   }
 
   sockaddr addr = to->to_host();
 
   // Ensure the bound interface can route to the loopback interface/itself
-  if (cvars::bind_interface) {
+  if (cvars::bind_interface && !cvars::network_synthetic_loopback) {
     sockaddr_in* addr_in = reinterpret_cast<sockaddr_in*>(&addr);
 
     if (addr_in->sin_addr.s_addr == xe::byte_swap(LOOPBACK)) {

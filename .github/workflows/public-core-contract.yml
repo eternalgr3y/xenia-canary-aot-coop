@@ -1,0 +1,22 @@
+name: Same-PC public core source contract
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-contract:
+    runs-on: windows-latest
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify public source boundary
+        shell: pwsh
+        run: ./tools/public-alpha/test_same_pc_public_core.ps1

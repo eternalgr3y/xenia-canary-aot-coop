@@ -27,6 +27,20 @@ DEFINE_path(mappings_file, "gamecontrollerdb.txt",
             "Filename of a database with custom game controller mappings.",
             "SDL");
 
+DEFINE_string(
+    hid_sdl_allowed_devices, "",
+    "Restrict the SDL input driver to ONLY the listed USB VID/PID game "
+    "controllers, e.g. \"0x045E/0x028E\" (comma-separate multiple). Every "
+    "other controller is ignored by this xenia instance. Use this to lock one "
+    "physical pad to one instance for same-PC co-op so each instance gets its "
+    "own controller in slot 0 / Player 1. Empty = use all controllers.",
+    "HID");
+
+DEFINE_bool(hid_sdl_invert_right_x, false,
+            "Invert the SDL right-stick horizontal axis. Default off; intended "
+            "for per-instance controller/profile correction.",
+            "HID");
+
 namespace xe {
 namespace hid {
 namespace sdl {
@@ -105,6 +119,21 @@ X_STATUS SDLInputDriver::Setup() {
           return 0;
         },
         this);
+
+    // Optionally restrict this instance to a specific set of controllers (by
+    // USB VID/PID) BEFORE the gamecontroller subsystem enumerates devices. Set
+    // with OVERRIDE priority so it wins over any inherited environment
+    // variable. This is how same-PC co-op locks one physical pad to one xenia
+    // instance: each instance passes its own
+    // --hid_sdl_allowed_devices=0xVID/0xPID, so it only ever opens that one pad
+    // (which then lands in slot 0 / Player 1).
+    if (!cvars::hid_sdl_allowed_devices.empty()) {
+      SDL_SetHintWithPriority(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT,
+                              cvars::hid_sdl_allowed_devices.c_str(),
+                              SDL_HINT_OVERRIDE);
+      XELOGI("SDL HID: restricting to controller VID/PID list \"{}\".",
+             cvars::hid_sdl_allowed_devices);
+    }
 
     if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) < 0) {
       return;
@@ -442,6 +471,33 @@ void SDLInputDriver::HandleEvent(const SDL_Event& event) {
   return;
 }
 
+// Returns true if the given controller VID/PID is permitted by the
+// hid_sdl_allowed_devices cvar. Empty cvar => all controllers allowed. The cvar
+// is a list of "0xVID/0xPID" pairs (comma/space separated). This is the
+// authoritative same-PC co-op gate: it is enforced inside xenia, so it holds
+// regardless of which SDL joystick backend enumerated the pad.
+static bool IsControllerVidPidAllowed(uint16_t vendor, uint16_t product) {
+  const std::string& list = cvars::hid_sdl_allowed_devices;
+  if (list.empty()) {
+    return true;
+  }
+  const char* p = list.c_str();
+  while ((p = SDL_strstr(p, "0x")) != nullptr) {
+    char* end = nullptr;
+    const uint32_t vid = static_cast<uint32_t>(SDL_strtoul(p, &end, 16));
+    const char* q = SDL_strstr(end, "0x");
+    if (!q) {
+      break;
+    }
+    const uint32_t pid = static_cast<uint32_t>(SDL_strtoul(q, &end, 16));
+    if ((vid & 0xFFFF) == vendor && (pid & 0xFFFF) == product) {
+      return true;
+    }
+    p = end;
+  }
+  return false;
+}
+
 void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
   // Open the controller.
   const auto controller = SDL_GameControllerOpen(event.cdevice.which);
@@ -478,14 +534,39 @@ void SDLInputDriver::OnControllerDeviceAdded(const SDL_Event& event) {
       "?", "?",
 #endif
       guid_str);
+
+  // Same-PC co-op gate: when hid_sdl_allowed_devices is set, only accept the
+  // listed VID/PID controller(s) in THIS instance and close (ignore) any other
+  // pad, so each instance latches exactly one physical controller in slot 0.
+#if SDL_VERSION_ATLEAST(2, 0, 6)
+  if (!cvars::hid_sdl_allowed_devices.empty()) {
+    const uint16_t vendor = SDL_GameControllerGetVendor(controller);
+    const uint16_t product = SDL_GameControllerGetProduct(controller);
+    if (!IsControllerVidPidAllowed(vendor, product)) {
+      XELOGI(
+          "SDL HID: ignoring controller 0x{:04X}/0x{:04X} - not in "
+          "hid_sdl_allowed_devices (\"{}\").",
+          vendor, product, cvars::hid_sdl_allowed_devices);
+      SDL_GameControllerClose(controller);
+      return;
+    }
+  }
+#endif
+
   int user_id = -1;
 #if SDL_VERSION_ATLEAST(2, 0, 9)
-  // Check if the controller has a player index LED.
-  user_id = SDL_GameControllerGetPlayerIndex(controller);
-  // Is that id already taken?
-  if (user_id < 0 || user_id >= controllers_.size() ||
-      controllers_.at(user_id).sdl) {
-    user_id = -1;
+  // Check if the controller has a player index LED. Skip this when a device
+  // filter is active (same-PC co-op): the one allowed pad must always land in
+  // slot 0 / Player 1, NOT the player index the system assigned it (e.g. the
+  // wired pad can be system index 1 when another pad took index 0, which would
+  // otherwise push this instance to Player 2).
+  if (cvars::hid_sdl_allowed_devices.empty()) {
+    user_id = SDL_GameControllerGetPlayerIndex(controller);
+    // Is that id already taken?
+    if (user_id < 0 || user_id >= controllers_.size() ||
+        controllers_.at(user_id).sdl) {
+      user_id = -1;
+    }
   }
 #endif
   // No player index or already taken, just take the first free slot.
@@ -543,7 +624,8 @@ void SDLInputDriver::OnControllerDeviceAxisMotion(const SDL_Event& event) {
       pad.thumb_ly = ~event.caxis.value;
       break;
     case SDL_CONTROLLER_AXIS_RIGHTX:
-      pad.thumb_rx = event.caxis.value;
+      pad.thumb_rx = cvars::hid_sdl_invert_right_x ? ~event.caxis.value
+                                                   : event.caxis.value;
       break;
     case SDL_CONTROLLER_AXIS_RIGHTY:
       pad.thumb_ry = ~event.caxis.value;

@@ -53,6 +53,8 @@ DECLARE_int32(network_mode);
 
 DECLARE_bool(bind_interface);
 
+DECLARE_bool(network_synthetic_loopback);
+
 enum XNET_QOS {
   LISTEN_ENABLE = 0x01,
   LISTEN_DISABLE = 0x02,
@@ -945,8 +947,14 @@ dword_result_t NetDll_XNetInAddrToXnAddr_entry(dword_t caller, dword_t in_addr,
   // Find cached online IP?
   if (XLiveAPI::macAddressCache.find(xn_addr->inaOnline.s_addr) ==
       XLiveAPI::macAddressCache.end()) {
+    // Synthetic loopback addresses remain unique per instance. The backend
+    // response also carries the instance port used for local peer routing.
     const auto player = kernel_state()->GetXboxLiveAPI()->FindPlayer(
         ip_to_string(xn_addr->inaOnline));
+
+    if (cvars::network_synthetic_loopback && player && player->Port()) {
+      xn_addr->wPortOnline = player->Port();
+    }
 
     // FIXME
     if (!cached_session_id || EXPLICIT_XBOXLIVE_KEY) {
@@ -2092,12 +2100,6 @@ dword_result_t NetDll_bind_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
-  const auto network_adapter =
-      kernel_state()->emulator()->GetNetworkAdapterManager();
-
-  const std::string local_ip =
-      network_adapter->GetSelectedAdapterLocalIPString();
-
   X_STATUS status = socket->Bind(name, namelen);
   if (XFAILED(status)) {
     XThread::SetLastError(socket->GetLastWSAError());
@@ -2105,11 +2107,32 @@ dword_result_t NetDll_bind_entry(dword_t caller, dword_t socket_handle,
     return -1;
   }
 
+  if (cvars::network_synthetic_loopback) {
+    // Same-PC synthetic: no router UPnP needed or wanted (127.x not mappable
+    // on real IGD; traffic is local loopback using distinct per-MAC IPs/ports).
+    // Just use the port the title bound; it will be reachable via the
+    // synthetic 127.x that we bound the native socket to.
+    uint16_t bound_port = name->address_port
+                              ? static_cast<uint16_t>(name->address_port)
+                              : socket->bound_port();
+    if (cvars::logging) {
+      XELOGI("Bind port {} (synthetic loopback, UPnP skipped)", bound_port);
+    }
+    return 0;
+  }
+
+  const auto network_adapter =
+      kernel_state()->emulator()->GetNetworkAdapterManager();
+
+  const std::string local_ip =
+      network_adapter->GetSelectedAdapterLocalIPString();
+
   const auto upnp = kernel_state()->emulator()->GetUPnP();
 
-  uint16_t upnp_internal_port = upnp->GetMappedBindPort(name->address_port);
-
+  uint16_t upnp_internal_port = 0;
   if (upnp) {
+    upnp_internal_port = upnp->GetMappedBindPort(name->address_port);
+
     const uint16_t mapped_internal_port =
         upnp->GetMappedBindPort(name->address_port);
 
