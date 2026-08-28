@@ -11,6 +11,8 @@
 
 #include "xenia/kernel/kernel_state.h"
 
+#include "xenia/kernel/aot_runtime_core.h"
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
@@ -82,6 +84,7 @@ KernelState::KernelState(Emulator* emulator)
 }
 
 KernelState::~KernelState() {
+  AotRuntimeSa2Shutdown();
   SetExecutableModule(nullptr);
 
   if (dispatch_thread_running_) {
@@ -884,6 +887,7 @@ void KernelState::InitXmpVolumePatch() {
 
 void KernelState::TerminateTitle() {
   XELOGD("KernelState::TerminateTitle");
+  AotRuntimeSa2Shutdown();
   xmp_volume_patch_.reset();
   auto global_lock = global_critical_region_.Acquire();
 

@@ -57,3 +57,25 @@ DEFINE_bool(break_condition_truncate, true, "truncate value to 32-bits", "CPU");
 
 DEFINE_bool(break_on_debugbreak, true, "int3 on JITed __debugbreak requests.",
             "CPU");
+
+DEFINE_string(
+    aot_runtime_peer_ipv4, "",
+    "Synthetic 127.x peer address for the default-off Army of Two same-PC "
+    "runtime core. 127.0.0.1 and this instance's own address are rejected.",
+    "CPU");
+DEFINE_bool(
+    aot_runtime_sa2, false,
+    "Enable the bounded XSA1 secure-association handshake for the configured "
+    "Army of Two same-PC peer.",
+    "CPU");
+DEFINE_bool(
+    aot_runtime_leg_destination_repair, false,
+    "Army of Two 454108D8: fill an empty type-1 leg destination with the "
+    "configured peer at the exact guarded retail seam. Mutates guest memory.",
+    "CPU");
+DEFINE_bool(
+    aot_runtime_xport_control_load_repair, false,
+    "Army of Two 454108D8 B19: restore r11=1 at the exact guarded XPort "
+    "control-load seam when the B19 predecessor forced zero while row+0x680 "
+    "is one. Mutates a guest register.",
+    "CPU");

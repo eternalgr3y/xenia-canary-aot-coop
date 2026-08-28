@@ -20,6 +20,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/string.h"
+#include "xenia/cpu/aot_runtime_core.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/label.h"
 #include "xenia/cpu/ppc/ppc_context.h"
@@ -200,7 +201,18 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 }
 
 void PPCHIRBuilder::MaybeBreakOnInstruction(uint32_t address) {
-  if (address != cvars::break_on_instruction) {
+  const bool aot_runtime_mutation =
+      (address == aot_runtime::kLegDestinationPc &&
+       cvars::aot_runtime_leg_destination_repair) ||
+      (address == aot_runtime::kXportControlLoadPc &&
+       cvars::aot_runtime_xport_control_load_repair);
+  if (address != cvars::break_on_instruction && !aot_runtime_mutation) {
+    return;
+  }
+
+  if (aot_runtime_mutation) {
+    Comment("AoT runtime-core mutation seam");
+    DebugBreak();
     return;
   }
 

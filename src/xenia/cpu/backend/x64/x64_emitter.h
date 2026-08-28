@@ -410,6 +410,7 @@ class X64Emitter : public Xbyak::CodeGenerator {
   uint32_t debug_info_flags_ = 0;
   FunctionTraceData* trace_data_ = nullptr;
   Arena source_map_arena_;
+  uint32_t aot_runtime_source_address_ = 0;
 
   size_t stack_size_ = 0;
 

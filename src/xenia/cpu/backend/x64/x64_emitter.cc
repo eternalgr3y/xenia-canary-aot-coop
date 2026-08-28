@@ -13,6 +13,7 @@
 
 #include <climits>
 #include <cstring>
+#include <optional>
 
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
@@ -24,6 +25,7 @@
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/vec128.h"
+#include "xenia/cpu/aot_runtime_core.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
@@ -38,6 +40,8 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/user_module.h"
 
 DEFINE_bool(debugprint_trap_log, false,
             "Log debugprint traps to the active debugger", "CPU");
@@ -377,6 +381,7 @@ void X64Emitter::MarkSourceOffset(const Instr* i) {
   entry->guest_address = static_cast<uint32_t>(i->src1.offset);
   entry->hir_offset = uint32_t(i->block->ordinal << 16) | i->ordinal;
   entry->code_offset = static_cast<uint32_t>(getSize());
+  aot_runtime_source_address_ = entry->guest_address;
 
   if (cvars::emit_source_annotations) {
     nop(2);
@@ -400,7 +405,129 @@ void X64Emitter::EmitGetCurrentThreadId() {
 
 void X64Emitter::EmitTraceUserCallReturn() {}
 
+uint64_t AotRuntimeCoreTrap(void* raw_context, uint64_t address) {
+  auto* context = reinterpret_cast<ppc::PPCContext_s*>(raw_context);
+  auto* thread_state = context ? context->thread_state : nullptr;
+  auto* memory = thread_state ? thread_state->memory() : nullptr;
+  if (!memory) {
+    return 0;
+  }
+
+  auto read32 = [&](uint32_t guest_address) -> uint32_t {
+    if (guest_address < 0x10000u || guest_address > 0xDFFFFFFCu ||
+        !memory->LookupHeap(guest_address)) {
+      return 0;
+    }
+    return xe::load_and_swap<uint32_t>(
+        memory->TranslateVirtual<void*>(guest_address));
+  };
+
+  const uint32_t guest_pc = static_cast<uint32_t>(address);
+  auto* kernel_state = context->kernel_state;
+  kernel::object_ref<kernel::UserModule> executable;
+  if (kernel_state) {
+    executable = kernel_state->GetExecutableModule();
+  }
+  const auto module_hash = executable ? executable->hash() : std::nullopt;
+  auto* executing_module = dynamic_cast<XexModule*>(
+      thread_state->processor()->LookupModule(guest_pc));
+  if (!executable || !module_hash ||
+      executable->xex_module() != executing_module ||
+      !aot_runtime::IsSupportedBuild(executable->title_id(), *module_hash)) {
+    return 0;
+  }
+
+  if (guest_pc == aot_runtime::kLegDestinationPc &&
+      cvars::aot_runtime_leg_destination_repair) {
+    // Exact retail function-entry fingerprint. The hook runs before the mflr.
+    const bool build_ok = read32(0x823A0CC4u) == 0x4E800020u &&
+                          read32(0x823A0CC8u) == 0x7D8802A6u &&
+                          read32(0x823A0CCCu) == 0x48F2849Du &&
+                          read32(0x823A0CD0u) == 0x9421FF60u &&
+                          read32(0x823A0CD4u) == 0x81640000u &&
+                          read32(0x823A0CD8u) == 0x7C7F1B78u &&
+                          read32(0x823A0CDCu) == 0x814300A8u &&
+                          read32(0x823A0CE0u) == 0x7C9D2378u &&
+                          read32(0x823A0CE4u) == 0x7CBB2B78u &&
+                          read32(0x823A0CE8u) == 0x7CDA3378u &&
+                          read32(0x823A0CECu) == 0x3B8B0008u &&
+                          read32(0x823A0CF0u) == 0x2B0A0001u &&
+                          read32(0x823A0CF4u) == 0x409A0094u &&
+                          read32(0x823A0CF8u) == 0x8164000Cu;
+    uint32_t peer = 0;
+    if (!build_ok || !aot_runtime::ParseSyntheticPeerIpv4(
+                         cvars::aot_runtime_peer_ipv4, &peer)) {
+      return 0;
+    }
+
+    const uint32_t leg = static_cast<uint32_t>(context->r[3]);
+    const uint32_t event = static_cast<uint32_t>(context->r[4]);
+    const bool objects_ok = leg >= 0x10000u && leg <= 0xDFFFFF5Bu &&
+                            event >= 0x10000u && event <= 0xDFFFFFF0u &&
+                            memory->LookupHeap(leg + 0xA4u) &&
+                            memory->LookupHeap(event + 0x0Cu);
+    if (!objects_ok || read32(event + 0x0Cu) != 1u ||
+        read32(leg + 0x78u) != 0u) {
+      return 0;
+    }
+    const uint16_t port = xe::load_and_swap<uint16_t>(
+        memory->TranslateVirtual<void*>(leg + 0x7Eu));
+    if (port != 0u) {
+      return 0;
+    }
+
+    // Approved mutation #1: fill only an entirely empty type-1 leg endpoint.
+    xe::store_and_swap<uint32_t>(memory->TranslateVirtual<void*>(leg + 0x78u),
+                                 peer);
+    xe::store_and_swap<uint16_t>(memory->TranslateVirtual<void*>(leg + 0x7Eu),
+                                 0x1771u);
+    return 0;
+  }
+
+  if (guest_pc == aot_runtime::kXportControlLoadPc &&
+      cvars::aot_runtime_xport_control_load_repair) {
+    // B19 deliberately replaces the retail predecessor `lbz r11,0x680(r31)`
+    // (897F0680) with `li r11,0` (39600000). This production seam accepts only
+    // that documented B19 fingerprint; unpatched retail is intentionally inert.
+    const bool build_ok = read32(0x8239D6B8u) == 0x895F0030u &&
+                          read32(0x8239D6BCu) == 0x39210070u &&
+                          read32(0x8239D6C0u) == 0x39600000u &&
+                          read32(0x8239D6C4u) == 0x7D4A0774u &&
+                          read32(0x8239D6C8u) == 0x280B0000u &&
+                          read32(0x8239D6CCu) == 0x7D6A5A14u;
+    const uint32_t row = static_cast<uint32_t>(context->r[31]);
+    if (!build_ok || row < 0x10000u || row > 0xDFFFF97Fu ||
+        !memory->LookupHeap(row + 0x680u)) {
+      return 0;
+    }
+    const uint8_t control = *memory->TranslateVirtual<uint8_t*>(row + 0x680u);
+    if (context->r[11] == 0u && control == 1u) {
+      // Approved mutation #2: repair only the transient register consumed by
+      // the untouched compare at 0x8239D6C8. Guest memory is not changed.
+      context->r[11] = 1u;
+    }
+  }
+  return 0;
+}
+
 void X64Emitter::DebugBreak() {
+  const uint32_t guest_address = aot_runtime_source_address_;
+  const bool requested_aot_runtime_hook =
+      (guest_address == aot_runtime::kLegDestinationPc &&
+       cvars::aot_runtime_leg_destination_repair) ||
+      (guest_address == aot_runtime::kXportControlLoadPc &&
+       cvars::aot_runtime_xport_control_load_repair);
+  if (requested_aot_runtime_hook) {
+    // Title scope is checked while compiling the title module. The native
+    // handler independently verifies the exact live instruction fingerprint.
+    const auto* execution_info =
+        guest_module_ ? guest_module_->opt_execution_info() : nullptr;
+    if (execution_info && execution_info->title_id == aot_runtime::kTitleId) {
+      CallNative(AotRuntimeCoreTrap, guest_address);
+    }
+    return;
+  }
+
   // TODO(benvanik): notify debugger.
   db(0xCC);
 }

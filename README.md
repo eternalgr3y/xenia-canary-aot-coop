@@ -1,18 +1,20 @@
 # Xenia Same-PC Netplay Foundation
 
-This branch is an early, source-level foundation for running two Xenia
-instances on one Windows PC. It adds opt-in synthetic loopback identities,
-per-instance SDL controller selection, and an optional controller-axis
-correction. The accepted Army of Two B19 run exercised the first two features;
-it did not exercise the axis correction.
+This branch is a source candidate for running *Army of Two: The 40th Day* in
+two Xenia instances on one Windows PC. It combines opt-in synthetic loopback
+identities and per-instance SDL controller selection with a narrowly fenced
+title-specific runtime core for the supported B19 retail build.
 
-This is **not yet a complete Army of Two co-op alpha**. The accepted run also
-depended on a title-specific secure-association and native post-join
-compatibility layer that has intentionally not been published here until it can
-be reduced and independently validated. See
+The runtime core contains a bounded secure-association handshake and two
+default-off compatibility repairs. It deliberately excludes the historical
+probe harness, broad guest traps, diagnostic fallbacks, and private runtime
+artifacts. This reduced candidate is source- and build-tested; it has not yet
+passed a clean two-controller runtime acceptance run. See
+[`AOT_RUNTIME_CORE.md`](AOT_RUNTIME_CORE.md) and
 [`PUBLIC_ALPHA_BOUNDARY.md`](PUBLIC_ALPHA_BOUNDARY.md) for the exact boundary.
 
-The source contract runs in CI. A local release build may be produced with
+The source contract runs in CI, and focused transport unit tests are included.
+A local release build may be produced with
 `xb setup` followed by `xb build --config=release --target=xenia-app`.
 Successful compilation does not establish gameplay compatibility.
 

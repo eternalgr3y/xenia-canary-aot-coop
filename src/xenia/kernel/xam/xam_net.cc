@@ -18,6 +18,7 @@
 
 #include "xenia/base/logging.h"
 #include "xenia/kernel/XLiveAPI.h"
+#include "xenia/kernel/aot_runtime_core.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/net_utils.h"
 #include "xenia/kernel/util/network_adapter_manager.h"
@@ -756,6 +757,8 @@ dword_result_t NetDll_XNetUnregisterInAddr_entry(dword_t caller, dword_t addr) {
   XELOGI("NetDll_XNetUnregisterInAddr({:08X})",
          cvars::log_mask_ips ? 0 : addr.value());
 
+  AotRuntimeSa2Unregister(kernel_state(), addr.value());
+
   // return static_cast<uint32_t>(X_WSAError::X_WSAEINVAL);
 
   return X_ERROR_SUCCESS;
@@ -764,6 +767,8 @@ DECLARE_XAM_EXPORT1(NetDll_XNetUnregisterInAddr, kNetworking, kStub);
 
 dword_result_t NetDll_XNetConnect_entry(dword_t caller, dword_t addr) {
   XELOGI("XNetConnect({:08X})", cvars::log_mask_ips ? 0 : addr.value());
+
+  AotRuntimeSa2Connect(kernel_state(), addr.value());
 
   // 43430806, 43430821 and 5841124E fail to connect without sleep.
   xe::threading::Sleep(150ms);
@@ -775,6 +780,13 @@ DECLARE_XAM_EXPORT1(NetDll_XNetConnect, kNetworking, kStub);
 dword_result_t NetDll_XNetGetConnectStatus_entry(dword_t caller, dword_t addr) {
   XELOGI("XNetGetConnectStatus({:08X})",
          cvars::log_mask_ips ? 0 : addr.value());
+
+  aot_runtime::Sa2State aot_state = aot_runtime::Sa2State::kIdle;
+  if (AotRuntimeSa2Query(kernel_state(), addr.value(), &aot_state)) {
+    return aot_state == aot_runtime::Sa2State::kEstablished
+               ? STATUS_CONNECTED
+               : XNET_CONNECT_STATUS_PENDING;
+  }
 
   return STATUS_CONNECTED;
 }

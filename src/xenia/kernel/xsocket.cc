@@ -9,9 +9,11 @@
 
 #include "src/xenia/kernel/xsocket.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "xenia/base/platform.h"
+#include "xenia/kernel/aot_runtime_core.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
@@ -444,6 +446,7 @@ int XSocket::PollWSARecvFrom(bool wait, WSARecvFromData receive_async_data) {
   auto buffers = new WSABUF[receive_async_data.num_buffers];
 
   int ret;
+poll_again:
   do {
 #ifdef XE_PLATFORM_WIN32
     ret = WSAPoll(fds, 1, wait ? 1000 : 0);
@@ -482,24 +485,91 @@ int XSocket::PollWSARecvFrom(bool wait, WSARecvFromData receive_async_data) {
   {
     std::unique_lock socket_lock(receive_socket_mutex_);
 
-    sockaddr* sa = nullptr;
-    if (receive_async_data.from) {
-      sockaddr addr = receive_async_data.from->to_host();
-      sa = const_cast<sockaddr*>(&addr);
-    }
+    const bool intercept_sa2 = type_ == X_SOCK_DGRAM &&
+                               bound_port_ == aot_runtime::kSa2GamePort &&
+                               AotRuntimeSa2InterceptionEnabled(kernel_state());
+    if (!intercept_sa2) {
+      // Preserve the upstream receive path exactly when the title-scoped,
+      // default-off runtime core is not active.
+      sockaddr* sa = nullptr;
+      if (receive_async_data.from) {
+        sockaddr addr = receive_async_data.from->to_host();
+        sa = const_cast<sockaddr*>(&addr);
+      }
 
-    ret = ::WSARecvFrom(native_handle_, buffers, receive_async_data.num_buffers,
+      ret =
+          ::WSARecvFrom(native_handle_, buffers, receive_async_data.num_buffers,
                         &bytes_received, &flags, sa,
                         (LPINT)receive_async_data.from_len, nullptr, nullptr);
-    if (ret < 0) {
-      receive_async_data.overlapped->internal_high = GetLastWSAError();
+      if (ret < 0) {
+        receive_async_data.overlapped->internal_high = GetLastWSAError();
+      } else {
+        receive_async_data.overlapped->internal = bytes_received;
+      }
+      receive_async_data.from->to_guest(sa);
     } else {
-      receive_async_data.overlapped->internal = bytes_received;
+      sockaddr native_from{};
+      int native_from_len = sizeof(native_from);
+      if (receive_async_data.from) {
+        native_from = receive_async_data.from->to_host();
+      }
+
+      ret =
+          ::WSARecvFrom(native_handle_, buffers, receive_async_data.num_buffers,
+                        &bytes_received, &flags, &native_from, &native_from_len,
+                        nullptr, nullptr);
+      bool consumed = false;
+      if (ret < 0) {
+        receive_async_data.overlapped->internal_high = GetLastWSAError();
+      } else if (bytes_received == aot_runtime::kSa2FrameSize &&
+                 native_from.sa_family == AF_INET) {
+        std::array<uint8_t, aot_runtime::kSa2FrameSize> frame{};
+        size_t copied = 0;
+        for (uint32_t i = 0;
+             i < receive_async_data.num_buffers && copied < frame.size(); ++i) {
+          const size_t amount =
+              std::min<size_t>(buffers[i].len, frame.size() - copied);
+          std::memcpy(frame.data() + copied, buffers[i].buf, amount);
+          copied += amount;
+        }
+        const auto& source = reinterpret_cast<const sockaddr_in&>(native_from);
+        if (copied == frame.size()) {
+          consumed = AotRuntimeSa2HandleRequest(
+              kernel_state(), frame.data(), frame.size(),
+              source.sin_addr.s_addr, [&](const auto& ack) {
+                const int sent = ::sendto(
+                    native_handle_, reinterpret_cast<const char*>(ack.data()),
+                    static_cast<int>(ack.size()), 0, &native_from,
+                    native_from_len);
+                return sent == static_cast<int>(ack.size());
+              });
+        }
+      }
+
+      if (!consumed) {
+        if (ret >= 0) {
+          receive_async_data.overlapped->internal = bytes_received;
+        }
+        if (receive_async_data.from) {
+          receive_async_data.from->to_guest(&native_from);
+          if (receive_async_data.from_len) {
+            *receive_async_data.from_len = native_from_len;
+          }
+        }
+      }
+      socket_lock.unlock();
+      if (consumed) {
+        // A control frame is not a zero-byte game datagram. Poll again so the
+        // guest observes only the next real datagram (or normal would-block /
+        // pending behavior when no real datagram is ready).
+        goto poll_again;
+      }
+      goto receive_complete;
     }
-    receive_async_data.from->to_guest(sa);
     socket_lock.unlock();
   }
 
+receive_complete:
   receive_async_data.overlapped->offset = flags;
 #else
   auto buffers = new iovec[receive_async_data.num_buffers];

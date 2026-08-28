@@ -35,4 +35,12 @@ DECLARE_bool(break_condition_truncate);
 
 DECLARE_bool(break_on_debugbreak);
 
+// Army of Two: The 40th Day (454108D8) same-PC runtime core. Every option is
+// default-off and is additionally fenced to the supported retail build at the
+// behavior site.
+DECLARE_string(aot_runtime_peer_ipv4);
+DECLARE_bool(aot_runtime_sa2);
+DECLARE_bool(aot_runtime_leg_destination_repair);
+DECLARE_bool(aot_runtime_xport_control_load_repair);
+
 #endif  // XENIA_CPU_CPU_FLAGS_H_
