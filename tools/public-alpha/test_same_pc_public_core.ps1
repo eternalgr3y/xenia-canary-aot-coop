@@ -38,8 +38,17 @@ $required = [ordered]@{
     loopback_requires_whoami = $source.xlive -match 'network_synthetic_loopback &&\s*online_ip_\.sin_addr\.s_addr != 0'
     title_id = $source.cpuContract.Contains('0x454108D8u')
     module_hash = $source.cpuContract.Contains('0x7C5F016EA6A81E95ull')
-    strict_peer_parser = $source.cpuContract.Contains('octets[0] != 127u') -and
-        $source.cpuContract.Contains('parsed == 0x7F000001u')
+    strict_peer_parser = $source.cpuContract.Contains(
+        'IsSyntheticLoopbackGuestIpv4(parsed)') -and
+        $source.cpuContract.Contains('address != 0x7F000001u')
+    mutation_rejects_own_peer = $source.emitter.Contains(
+        'IsDistinctSyntheticPeer(peer, own_guest)') -and
+        $source.tests.Contains('must differ from the local synthetic identity')
+    mutation_helpers_tested = $source.emitter.Contains(
+        'TryRepairLegDestination(') -and
+        $source.emitter.Contains('TryRepairXportControlLoad(') -and
+        $source.tests.Contains('leg destination repair is exact') -and
+        $source.tests.Contains('preserves full-width rejects')
     sa2_default_off = $source.cpuFlags.Contains('aot_runtime_sa2, false,')
     leg_default_off = $source.cpuFlags.Contains('aot_runtime_leg_destination_repair, false,')
     xport_default_off = $source.cpuFlags.Contains('aot_runtime_xport_control_load_repair, false,')
@@ -53,7 +62,8 @@ $required = [ordered]@{
         $source.emitter.Contains('read32(0x8239D6CCu) == 0x7D6A5A14u')
     xport_b19_only = $source.emitter.Contains('read32(0x8239D6C0u) == 0x39600000u') -and
         $source.emitter.Contains('(897F0680)')
-    xport_full_register = $source.emitter.Contains('context->r[11] == 0u')
+    xport_full_register = $source.cpuContract.Contains('*r11 != 0u') -and
+        $source.emitter.Contains('uint64_t repaired_r11 = context->r[11]')
     owned_worker = $source.sa2.Contains('worker.join();') -and
         $source.sa2.Contains('lifecycle_lock(lifecycle_mutex_)')
     bounded_worker = $source.sa2Header.Contains('maximum_receive_calls = 640u') -and
@@ -66,13 +76,17 @@ $required = [ordered]@{
     ack_generation_commit = $source.sa2.Contains('generation_ != generation') -and
         $source.sa2.Contains('if (!ack_sender(ack))')
     async_only_intercept = $source.xsocket.Contains('if (!intercept_sa2)') -and
+        $source.xsocket.Contains('AotRuntimeSa2ShouldPollAgain(disposition)') -and
         $source.xsocket.Contains('goto poll_again;')
+    socket_disposition_tested = $source.tests.Contains(
+        'socket disposition passes rejects and polls after consumption') -and
+        $source.xsocket.Contains('AotRuntimeSa2Disposition(')
     focused_tests = $source.tests.Contains('prior local connect') -and
         $source.tests.Contains('concurrent same-peer starts') -and
         $source.tests.Contains('unregister during ACK') -and
         $source.tests.Contains('malformed flood')
     focused_test_tag = ([regex]::Matches($source.tests,
-        '\[aot-runtime-core\]')).Count -eq 7
+        '\[aot-runtime-core\]')).Count -eq 11
     ci_filtered_tests = $source.workflow.Contains(
         "xenia-kernel-tests.exe '[aot-runtime-core]'")
     ci_app_build = $source.workflow.Contains(

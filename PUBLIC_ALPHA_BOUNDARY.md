@@ -35,7 +35,9 @@ non-zero backend `whoami` result.
 Every runtime-core entry point requires title ID `454108D8` and executable
 module hash `7C5F016EA6A81E95`. Each mutation additionally requires the exact
 live instruction fingerprint. The XPort repair accepts only the documented B19
-patched predecessor, not unpatched retail code.
+patched predecessor, not unpatched retail code. The leg repair also fails
+closed when the configured peer is missing, non-synthetic, or equal to the
+instance's own initialized synthetic identity.
 
 ## Deliberately excluded
 

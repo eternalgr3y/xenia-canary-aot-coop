@@ -29,6 +29,45 @@ constexpr bool IsMutationAddress(uint32_t address) {
   return address == kLegDestinationPc || address == kXportControlLoadPc;
 }
 
+constexpr bool IsSyntheticLoopbackGuestIpv4(uint32_t address) {
+  return (address >> 24u) == 127u && address != 0x7F000000u &&
+         address != 0x7F000001u;
+}
+
+constexpr bool IsDistinctSyntheticPeer(uint32_t peer_address,
+                                       uint32_t own_address) {
+  return IsSyntheticLoopbackGuestIpv4(peer_address) &&
+         IsSyntheticLoopbackGuestIpv4(own_address) &&
+         peer_address != own_address;
+}
+
+struct LegDestinationEndpoint {
+  uint32_t ipv4 = 0;
+  uint16_t port = 0;
+};
+
+constexpr bool TryRepairLegDestination(
+    bool eligible, uint32_t event_type, uint32_t peer_ipv4,
+    LegDestinationEndpoint* endpoint) noexcept {
+  if (!eligible || !endpoint || event_type != 1u ||
+      !IsSyntheticLoopbackGuestIpv4(peer_ipv4) || endpoint->ipv4 != 0u ||
+      endpoint->port != 0u) {
+    return false;
+  }
+  endpoint->ipv4 = peer_ipv4;
+  endpoint->port = 0x1771u;
+  return true;
+}
+
+constexpr bool TryRepairXportControlLoad(bool eligible, uint8_t control,
+                                         uint64_t* r11) noexcept {
+  if (!eligible || !r11 || *r11 != 0u || control != 1u) {
+    return false;
+  }
+  *r11 = 1u;
+  return true;
+}
+
 // Strict dotted-quad parser for the same-PC transport. The result is in the
 // title's conventional big-endian integer form (127.a.b.c => 0x7FaaBBcc).
 // Only distinct synthetic loopback peers are accepted; backend/self loopback
@@ -70,7 +109,7 @@ inline bool ParseSyntheticPeerIpv4(std::string_view text,
 
   const uint32_t parsed =
       (octets[0] << 24u) | (octets[1] << 16u) | (octets[2] << 8u) | octets[3];
-  if (octets[0] != 127u || parsed == 0x7F000000u || parsed == 0x7F000001u) {
+  if (!IsSyntheticLoopbackGuestIpv4(parsed)) {
     return false;
   }
   *guest_address = parsed;

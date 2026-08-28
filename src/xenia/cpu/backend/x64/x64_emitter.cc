@@ -18,6 +18,7 @@
 #include "third_party/fmt/include/fmt/format.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/atomic.h"
+#include "xenia/base/byte_order.h"
 #include "xenia/base/debugging.h"
 #include "xenia/base/literals.h"
 #include "xenia/base/logging.h"
@@ -40,6 +41,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
+#include "xenia/kernel/XLiveAPI.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/user_module.h"
 
@@ -459,6 +461,12 @@ uint64_t AotRuntimeCoreTrap(void* raw_context, uint64_t address) {
                          cvars::aot_runtime_peer_ipv4, &peer)) {
       return 0;
     }
+    auto* xlive = kernel_state->GetXboxLiveAPI();
+    const uint32_t own_guest =
+        xlive ? xe::byte_swap(xlive->OnlineIP().sin_addr.s_addr) : 0u;
+    if (!aot_runtime::IsDistinctSyntheticPeer(peer, own_guest)) {
+      return 0;
+    }
 
     const uint32_t leg = static_cast<uint32_t>(context->r[3]);
     const uint32_t event = static_cast<uint32_t>(context->r[4]);
@@ -466,21 +474,22 @@ uint64_t AotRuntimeCoreTrap(void* raw_context, uint64_t address) {
                             event >= 0x10000u && event <= 0xDFFFFFF0u &&
                             memory->LookupHeap(leg + 0xA4u) &&
                             memory->LookupHeap(event + 0x0Cu);
-    if (!objects_ok || read32(event + 0x0Cu) != 1u ||
-        read32(leg + 0x78u) != 0u) {
+    if (!objects_ok) {
       return 0;
     }
-    const uint16_t port = xe::load_and_swap<uint16_t>(
-        memory->TranslateVirtual<void*>(leg + 0x7Eu));
-    if (port != 0u) {
+    aot_runtime::LegDestinationEndpoint endpoint{
+        read32(leg + 0x78u), xe::load_and_swap<uint16_t>(
+                                 memory->TranslateVirtual<void*>(leg + 0x7Eu))};
+    if (!aot_runtime::TryRepairLegDestination(true, read32(event + 0x0Cu), peer,
+                                              &endpoint)) {
       return 0;
     }
 
     // Approved mutation #1: fill only an entirely empty type-1 leg endpoint.
     xe::store_and_swap<uint32_t>(memory->TranslateVirtual<void*>(leg + 0x78u),
-                                 peer);
+                                 endpoint.ipv4);
     xe::store_and_swap<uint16_t>(memory->TranslateVirtual<void*>(leg + 0x7Eu),
-                                 0x1771u);
+                                 endpoint.port);
     return 0;
   }
 
@@ -501,10 +510,11 @@ uint64_t AotRuntimeCoreTrap(void* raw_context, uint64_t address) {
       return 0;
     }
     const uint8_t control = *memory->TranslateVirtual<uint8_t*>(row + 0x680u);
-    if (context->r[11] == 0u && control == 1u) {
+    uint64_t repaired_r11 = context->r[11];
+    if (aot_runtime::TryRepairXportControlLoad(true, control, &repaired_r11)) {
       // Approved mutation #2: repair only the transient register consumed by
       // the untouched compare at 0x8239D6C8. Guest memory is not changed.
-      context->r[11] = 1u;
+      context->r[11] = repaired_r11;
     }
   }
   return 0;

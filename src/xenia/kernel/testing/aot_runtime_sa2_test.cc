@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "xenia/cpu/aot_runtime_core.h"
+#include "xenia/kernel/aot_runtime_core.h"
 #include "xenia/kernel/aot_runtime_sa2.h"
 
 namespace xe::kernel::aot_runtime {
@@ -132,11 +133,77 @@ TEST_CASE("AoT runtime peer parser rejects overlong octets",
           "[aot][sa2][aot-runtime-core]") {
   uint32_t parsed = 0xA5A5A5A5u;
   CHECK_FALSE(xe::cpu::aot_runtime::ParseSyntheticPeerIpv4(
-      "127.222222222222222222222222222222222222222222222222.2.3",
-      &parsed));
+      "127.222222222222222222222222222222222222222222222222.2.3", &parsed));
   CHECK(parsed == 0xA5A5A5A5u);
   CHECK(xe::cpu::aot_runtime::ParseSyntheticPeerIpv4("127.2.3.4", &parsed));
   CHECK(parsed == 0x7F020304u);
+}
+
+TEST_CASE("AoT runtime peer must differ from the local synthetic identity",
+          "[aot][sa2][aot-runtime-core]") {
+  using xe::cpu::aot_runtime::IsDistinctSyntheticPeer;
+  CHECK(IsDistinctSyntheticPeer(0x7F020304u, 0x7F050607u));
+  CHECK_FALSE(IsDistinctSyntheticPeer(0x7F020304u, 0x7F020304u));
+  CHECK_FALSE(IsDistinctSyntheticPeer(0x7F020304u, 0u));
+  CHECK_FALSE(IsDistinctSyntheticPeer(0x7F020304u, 0x7F000001u));
+  CHECK_FALSE(IsDistinctSyntheticPeer(0xC0A80001u, 0x7F050607u));
+}
+
+TEST_CASE("AoT leg destination repair is exact and fail closed",
+          "[aot][mutation][aot-runtime-core]") {
+  using xe::cpu::aot_runtime::LegDestinationEndpoint;
+  using xe::cpu::aot_runtime::TryRepairLegDestination;
+
+  LegDestinationEndpoint accepted{};
+  REQUIRE(TryRepairLegDestination(true, 1u, 0x7F020304u, &accepted));
+  CHECK(accepted.ipv4 == 0x7F020304u);
+  CHECK(accepted.port == 0x1771u);
+
+  for (const auto& rejected :
+       std::array{LegDestinationEndpoint{0u, 0u},
+                  LegDestinationEndpoint{0x7F090909u, 0u},
+                  LegDestinationEndpoint{0u, 0x1771u}}) {
+    auto endpoint = rejected;
+    const auto original = endpoint;
+    const bool eligible = rejected.ipv4 != 0u || rejected.port != 0u;
+    CHECK_FALSE(TryRepairLegDestination(eligible, 1u, 0x7F020304u, &endpoint));
+    CHECK(endpoint.ipv4 == original.ipv4);
+    CHECK(endpoint.port == original.port);
+  }
+
+  for (uint32_t event_type : {0u, 2u}) {
+    LegDestinationEndpoint endpoint{};
+    CHECK_FALSE(
+        TryRepairLegDestination(true, event_type, 0x7F020304u, &endpoint));
+    CHECK(endpoint.ipv4 == 0u);
+    CHECK(endpoint.port == 0u);
+  }
+  LegDestinationEndpoint invalid_peer{};
+  CHECK_FALSE(TryRepairLegDestination(true, 1u, 0xC0A80001u, &invalid_peer));
+  CHECK_FALSE(TryRepairLegDestination(true, 1u, 0x7F020304u, nullptr));
+}
+
+TEST_CASE("AoT XPort control-load repair preserves full-width rejects",
+          "[aot][mutation][aot-runtime-core]") {
+  using xe::cpu::aot_runtime::TryRepairXportControlLoad;
+
+  uint64_t accepted = 0u;
+  REQUIRE(TryRepairXportControlLoad(true, 1u, &accepted));
+  CHECK(accepted == 1u);
+
+  for (uint64_t original :
+       std::array<uint64_t, 3>{0u, 1u, 0x0000000100000000ull}) {
+    uint64_t value = original;
+    const bool eligible = original != 0u;
+    CHECK_FALSE(TryRepairXportControlLoad(eligible, 1u, &value));
+    CHECK(value == original);
+  }
+  for (uint8_t control : {uint8_t{0}, uint8_t{2}}) {
+    uint64_t value = 0u;
+    CHECK_FALSE(TryRepairXportControlLoad(true, control, &value));
+    CHECK(value == 0u);
+  }
+  CHECK_FALSE(TryRepairXportControlLoad(true, 1u, nullptr));
 }
 
 TEST_CASE("SA2 request requires a prior local connect",
@@ -166,6 +233,42 @@ TEST_CASE("SA2 request requires a prior local connect",
   CHECK_FALSE(
       manager.HandleRequest(request.data(), request.size(), kPeer, sender));
   CHECK(ack_calls == 1);
+}
+
+TEST_CASE("SA2 socket disposition passes rejects and polls after consumption",
+          "[aot][sa2][aot-runtime-core]") {
+  const auto pass = AotRuntimeSa2Disposition(false);
+  CHECK(pass == AotRuntimeSa2DatagramDisposition::kPassThrough);
+  CHECK_FALSE(AotRuntimeSa2ShouldPollAgain(pass));
+
+  const auto consume = AotRuntimeSa2Disposition(true);
+  CHECK(consume == AotRuntimeSa2DatagramDisposition::kConsumeAndPollAgain);
+  CHECK(AotRuntimeSa2ShouldPollAgain(consume));
+
+  Sa2Manager manager;
+  const auto request = Sa2Manager::BuildFrame(0, kPeer, kOwn);
+  const auto original = request;
+  CHECK(AotRuntimeSa2Disposition(manager.HandleRequest(
+            request.data(), request.size(), kPeer, [](const auto&) {
+              return true;
+            })) == AotRuntimeSa2DatagramDisposition::kPassThrough);
+  CHECK(request == original);
+
+  auto state = std::make_shared<FakeState>();
+  REQUIRE(manager.Start(kOwn, kPeer, Factory(state), LongOptions()));
+  auto rejected = request;
+  rejected[0] ^= 0xFF;
+  const auto rejected_original = rejected;
+  CHECK(AotRuntimeSa2Disposition(manager.HandleRequest(
+            rejected.data(), rejected.size(), kPeer, [](const auto&) {
+              return true;
+            })) == AotRuntimeSa2DatagramDisposition::kPassThrough);
+  CHECK(rejected == rejected_original);
+  CHECK(AotRuntimeSa2Disposition(manager.HandleRequest(
+            request.data(), request.size(), kPeer, [](const auto&) {
+              return true;
+            })) == AotRuntimeSa2DatagramDisposition::kConsumeAndPollAgain);
+  manager.Stop();
 }
 
 TEST_CASE("SA2 rejects malformed and spoofed requests",

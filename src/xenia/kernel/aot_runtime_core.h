@@ -21,6 +21,23 @@ namespace xe::kernel {
 
 class KernelState;
 
+enum class AotRuntimeSa2DatagramDisposition {
+  kPassThrough,
+  kConsumeAndPollAgain,
+};
+
+constexpr AotRuntimeSa2DatagramDisposition AotRuntimeSa2Disposition(
+    bool request_consumed) {
+  return request_consumed
+             ? AotRuntimeSa2DatagramDisposition::kConsumeAndPollAgain
+             : AotRuntimeSa2DatagramDisposition::kPassThrough;
+}
+
+constexpr bool AotRuntimeSa2ShouldPollAgain(
+    AotRuntimeSa2DatagramDisposition disposition) {
+  return disposition == AotRuntimeSa2DatagramDisposition::kConsumeAndPollAgain;
+}
+
 bool AotRuntimeSa2Connect(KernelState* kernel_state,
                           uint32_t guest_peer_address);
 bool AotRuntimeSa2Query(KernelState* kernel_state, uint32_t guest_peer_address,

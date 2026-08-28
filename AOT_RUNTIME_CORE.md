@@ -11,7 +11,9 @@ and executable module hash `7C5F016EA6A81E95`. The network mechanism also
 requires synthetic loopback, a successful non-zero online identity, and one
 explicit peer supplied by `--aot_runtime_peer_ipv4`. Only distinct `127.x`
 addresses are accepted; `127.0.0.0`, `127.0.0.1`, and the instance's own
-address are rejected.
+address are rejected. The leg-destination repair independently rechecks that
+the configured peer differs from the initialized local synthetic identity
+before it can write an endpoint.
 
 Enable the bounded association worker with `--aot_runtime_sa2=true`. A local
 `XNetConnect` for the configured peer is the only operation that arms it.

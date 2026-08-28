@@ -518,7 +518,7 @@ poll_again:
           ::WSARecvFrom(native_handle_, buffers, receive_async_data.num_buffers,
                         &bytes_received, &flags, &native_from, &native_from_len,
                         nullptr, nullptr);
-      bool consumed = false;
+      auto disposition = AotRuntimeSa2DatagramDisposition::kPassThrough;
       if (ret < 0) {
         receive_async_data.overlapped->internal_high = GetLastWSAError();
       } else if (bytes_received == aot_runtime::kSa2FrameSize &&
@@ -534,7 +534,7 @@ poll_again:
         }
         const auto& source = reinterpret_cast<const sockaddr_in&>(native_from);
         if (copied == frame.size()) {
-          consumed = AotRuntimeSa2HandleRequest(
+          disposition = AotRuntimeSa2Disposition(AotRuntimeSa2HandleRequest(
               kernel_state(), frame.data(), frame.size(),
               source.sin_addr.s_addr, [&](const auto& ack) {
                 const int sent = ::sendto(
@@ -542,11 +542,11 @@ poll_again:
                     static_cast<int>(ack.size()), 0, &native_from,
                     native_from_len);
                 return sent == static_cast<int>(ack.size());
-              });
+              }));
         }
       }
 
-      if (!consumed) {
+      if (disposition == AotRuntimeSa2DatagramDisposition::kPassThrough) {
         if (ret >= 0) {
           receive_async_data.overlapped->internal = bytes_received;
         }
@@ -558,7 +558,7 @@ poll_again:
         }
       }
       socket_lock.unlock();
-      if (consumed) {
+      if (AotRuntimeSa2ShouldPollAgain(disposition)) {
         // A control frame is not a zero-byte game datagram. Poll again so the
         // guest observes only the next real datagram (or normal would-block /
         // pending behavior when no real datagram is ready).
