@@ -1,5 +1,7 @@
 # Xenia Same-PC Netplay Foundation
 
+I built this because I wanted to play co-op without split-screen with my family; the community offers really no path to enabling networking so you're forced to play split screen in a sub 720p game - which is otherwise a fantastic game to play with a friend. This one PC is really the only testing environment that makes sense for me. I'm sure you could get this running so you can play on two different PC's or however you want, but a powerful PC with two monitors makes for a really run couch/nostalgia day and you can play in the same room with a friend! 
+
 This branch is a source candidate for running *Army of Two: The 40th Day* in
 two Xenia instances on one Windows PC. It combines opt-in synthetic loopback
 identities and per-instance SDL controller selection with a narrowly fenced
